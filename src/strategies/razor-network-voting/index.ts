@@ -4,8 +4,9 @@ import { BigNumber } from '@ethersproject/bignumber';
 export const author = 'razor-network';
 export const version = '0.1.0';
 
+const PAGE_SIZE = 1000;
 const RAZOR_NETWORK_SUBGRAPH_URL =
-  'https://api.thegraph.com/subgraphs/name/razor-network/razor';
+  'https://graph-indexer.razorscan.io/subgraphs/name/razor/razor';
 
 // a method to calculate corresponding razor amount for delegators
 function sRZR_to_RZR(
@@ -25,6 +26,68 @@ function wei_to_ether(amount: number) {
   return amount / 10 ** 18;
 }
 
+export async function getAllData(snapshot) {
+  let skip = 0;
+  let allDelegators = [];
+  let allStakers = [];
+
+  while (true) {
+    const params = {
+      delegators: {
+        __args: {
+          first: PAGE_SIZE,
+          skip
+        },
+        staker: {
+          totalSupply: true,
+          stake: true,
+          staker: true
+        },
+        delegatorAddress: true,
+        sAmount: true
+      },
+      stakers: {
+        __args: {
+          first: PAGE_SIZE,
+          skip
+        },
+        stake: true,
+        totalSupply: true,
+        staker: true,
+        sAmount: true
+      }
+    };
+
+    if (snapshot !== 'latest') {
+      // @ts-ignore
+      params.delegators.__args.block = { number: snapshot };
+      // @ts-ignore
+      params.stakers.__args.block = { number: snapshot };
+    }
+
+    const response = await subgraphRequest(RAZOR_NETWORK_SUBGRAPH_URL, params);
+
+    if (response.delegators && response.delegators.length) {
+      allDelegators = allDelegators.concat(response.delegators);
+    }
+
+    if (response.stakers && response.stakers.length) {
+      allStakers = allStakers.concat(response.stakers);
+    }
+
+    if (
+      response.stakers.length === PAGE_SIZE ||
+      response.delegators.length === PAGE_SIZE
+    ) {
+      skip += PAGE_SIZE;
+    } else {
+      break;
+    }
+  }
+
+  return { stakers: allStakers, delegators: allDelegators };
+}
+
 export async function strategy(
   space: any,
   network: any,
@@ -34,47 +97,15 @@ export async function strategy(
   //symbol: string,
   snapshot: string
 ) {
-  const params = {
-    delegators: {
-      __args: {
-        where: {
-          delegatorAddress_in: addresses
-        } // delegatorAddress
-      }, // Amount_Delegated
-      staker: {
-        totalSupply: true,
-        stake: true
-      },
-      delegatorAddress: true,
-      sAmount: true
-    },
-    stakers: {
-      __args: {
-        where: {
-          staker_in: addresses //  stakerAddress
-        }
-      },
-      stake: true,
-      totalSupply: true,
-      staker: true,
-      sAmount: true
-    }
-  };
-
-  if (snapshot !== 'latest') {
-    // @ts-ignore
-    params.delegators.__args.block = { number: snapshot };
-  }
-
   const score = {};
 
-  // subgraph request 1 : it fetches all the details of the stakers and delegators.
-  const result = await subgraphRequest(RAZOR_NETWORK_SUBGRAPH_URL, params);
-  if (result) {
+  // subgraph request : it fetches all the details of the stakers and delegators.
+  const result = await getAllData(snapshot);
+  if (result.delegators || result.stakers) {
     result.delegators.forEach(
       async (delegator: {
         sAmount: string;
-        staker: { stake: string; totalSupply: string };
+        staker: { stake: string; totalSupply: string; staker: string };
         delegatorAddress: string;
       }) => {
         const razor_amount = sRZR_to_RZR(
@@ -82,17 +113,22 @@ export async function strategy(
           BigNumber.from(delegator.staker.totalSupply),
           BigNumber.from(delegator.staker.stake)
         );
-        //if delegator has delegated to more than one staker, we need to add that amount also to calculate score.
-        if (!score[getAddress(delegator.delegatorAddress)]) {
-          //if score[delegator] has no score setup already we will put it as intial amount
-          score[getAddress(delegator.delegatorAddress)] = wei_to_ether(
-            Number(razor_amount)
-          );
-        } else {
-          // update the score of delegator by adding new Stoken -> razor Value
-          score[getAddress(delegator.delegatorAddress)] += wei_to_ether(
-            Number(razor_amount)
-          );
+        if (
+          getAddress(delegator.delegatorAddress) !=
+          getAddress(delegator.staker.staker)
+        ) {
+          //if delegator has delegated to more than one staker, we need to add that amount also to calculate score.
+          if (!score[getAddress(delegator.delegatorAddress)]) {
+            //if score[delegator] has no score setup already we will put it as intial amount
+            score[getAddress(delegator.delegatorAddress)] = wei_to_ether(
+              Number(razor_amount)
+            );
+          } else {
+            // update the score of delegator by adding new Stoken -> razor Value
+            score[getAddress(delegator.delegatorAddress)] += wei_to_ether(
+              Number(razor_amount)
+            );
+          }
         }
       }
     );
